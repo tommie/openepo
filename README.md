@@ -436,3 +436,10 @@ struct ButtonAct {}
   The limit can be made per message type.
   Note that powering the device off and on again could circumvent a simple rate limiter.
   It is suggested to introduce a slight startup delay to enforce the limit.
+
+
+## License
+
+This specification and implementation is licensed under the MIT license.
+
+We encourage you to engage with us, or at least share any derived works.
