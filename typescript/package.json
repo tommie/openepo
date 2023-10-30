@@ -1,0 +1,19 @@
+{
+  "name": "openepo",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "lint": "vue-tsc",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.4.0",
+    "typescript": "^5.0.2",
+    "vite": "^4.4.5",
+    "vue": "^3.3.7",
+    "vue-tsc": "^1.8.22"
+  }
+}
