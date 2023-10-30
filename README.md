@@ -37,11 +37,44 @@ The message layout would probably have been compatible with Thread, if its speci
                  The receiver should be user-friendly even on devices with limited battery capacity.
 * **Tamper-Safe:** Access to the receiver should not be enough to pair a new transmitter without difficulty.
                    A garage door being left open unattended should not make it possible for an attacker to simply pair a new key without being noticed.
-* **Versatility:** The transmissions are infrequent bursts, able to carry messages consisting of a vector of arbitrary-length integers.
-* **Interoperability:** The transmissions use a tag to help describe the message, but does not enforce the use of standardized tags.
+* **Versatile:** The transmissions are infrequent bursts, able to carry messages consisting of a vector of arbitrary-length integers.
+* **Interoperable:** The transmissions use a tag to help describe the message, but does not enforce the use of standardized tags.
 * **Replay-Safe:** Captured transmissions cannot be re-issued using a replay.
-* **Anonymous:** There is no plain text transmitter identifier to be learned by eavesdropping on the medium.
-                 Guarding against fingerprinting is out-of-scope, but devices are encouraged to transmit as little data as possible.
+* **Thread** Interoperability with Thread would be a plus, but not a requirement.
+
+
+## Protocol Overview and Concepts
+
+The protocol is expected to be used in security and other IoT devices where existing protocols are too complex, slow, or proprietary.
+The main applications are locks, garage doors and window blinds.
+
+The protocol operates over two media: a public medium and a quasi-private medium.
+The public medium is the 433 MHz spectrum (or similar open band.)
+The quasi-private medium is limited by line of sight, and is used to establish cryptographic trust between devices.
+We use visible light for this communication, allowing receivers to use a normal LED and transmitters to use a cheap LDR or photo-semiconductor as a detector.
+Thus, devices must be physically close to be *paired*.
+To avoid excessive battery usage detecting light, transmitters may decide to only enable photo-detection for some time after user input.
+
+Communication is half-duplex, and in most cases, one-way.
+Thus, we divide devices into *transmitters* (sensors, handheld remote controls, phone apps) and *receivers* (actuators, PLCs.)
+Although the protocol does not exclude two-way communication, it must be able to operate on small, efficient, transmitters.
+As such, we define transmitters to be the devices the users interact the most with.
+
+Each receiver is paired with one or more transmitters.
+The transmitters can be attached to one or more receivers, depending on its design and function.
+E.g. each button on the transmitter can be assigned to different receivers, or to different functions in one receiver.
+
+A transmitter sends messages encrypted with a *session key*, unique to the transmitter-receiver pair.
+The messages are sent in response to e.g. user input, changes in the environment, or time passing.
+
+Messages are described as packed structures of fields.
+The messages as a whole is versioned and type-tagged, but the schema is needed to parse the message.
+
+At the highest level of the protocol, *interfaces* describe what a device can do.
+E.g. a button, a numeric display, or temperature readout.
+A device can use several interfaces at the same time, and negotiating interfaces is part of pairing.
+
+Each interface has a number of *actions* the transmitter can send to the receiver.
 
 
 ## Operations
@@ -60,14 +93,15 @@ A transmitter and a receiver are paired, authorizing the receiver to act on the 
 4. Otherwise, the receiver repeatedly sends a *Hello* message with a *session key* to the transmitter using a line-of-sight modality, e.g. a visible-light LED.
    This symmetric key is freshly minted, stored in a temporary buffer, and transmitted unencrypted.
    Care must be taken to avoid excessive reach of the transmission, e.g. using low intensity, a collimating lens, a shroud and/or an enclosed space.
-5. If the transmitter does not recognize any requested device interface, it stops sending the *Hello* message.
+5. If the receiver does not recognize any requested device interface, it stops sending the *Hello* message.
    It indicates that the *Hello* message is no longer being sent, and that a failure occurred, using some means.
    Likewise, the transmitter stops after a timeout, e.g. 30 seconds.
 6. Otherwise, the transmitter receives the key and sends an *Establish* message over RF, encrypted using the key.
    The transmitter may require external action to enable reception, e.g. the user pressing a button, to simplify battery management.
-7. The receiver stores the new key as a valid session key.
+7. If the receiver is unable to pair the transmitter, e.g. due to incompatible interface types, it indicates this using some means.
+8. Otherwise, the receiver stores the new key as a valid session key.
    It indicates the successful pairing using some means.
-8. If the receiver is unable to pair the transmitter, e.g. due to incompatible interface types, it indicates this using some means.
+9. The receiver sends the *Bound* message indicating a successful pairing.
 
 ### Unpairing
 
@@ -82,7 +116,9 @@ A transmitter and a receiver that have been paired, can be deauthorized using th
    A time window of pairability opens, indicated on the receiver using some means other than configurability.
 3. An external action is taken on the the transmitter to be unpaired.
    Care must be taken to help the user avoid accidentally unpairing, e.g. by requiring multiple button presses in sequence.
-4. The transmitter sends a *Terminate* message, encrypted using the session key.
+4. The transmitter sends an *Unbind* message, encrypted using the session key.
+   The transmitter cannot clear its internal session key at this point, because it cannot know if the message was successfully received.
+   It may decide that the session key is only valid for *Unbind* messages going forward.
 5. The receiver removes the session key that was used to decrypt the message.
    Success is indicated using some means.
    Success is indicated whether or not the session key was found, indicating that the transmitter is no longer accepted.
@@ -99,6 +135,8 @@ A receiver can have all settings cleared using the following procedure:
    A time window of pairability opens, indicated on the receiver using some means other than configurability.
 3. The receiver erases all session keys.
    It should indicate success using some means.
+
+This operation is important to support re-selling devices, and to unpair a lost transmitter.
 
 ### Perform Action
 
@@ -131,9 +169,11 @@ Each frame byte after *S* is preceded by a one-bit one, making each message byte
 Each frame has the following layout:
 
 ```
-            .----------+-----+--------+-------------+---------+-----------+-----+-----.
-   Delay... | Preamble | SOF | Header | Unencrypted | EHeader | Encrypted | MIC | EOF | Delay...
-            '----------+-----+--------+-------------+---------+-----------+-----+-----'
+            .----------+-----+-------------------------------+-----+-----.
+            |          |     |  Unencrypted  |    Encrypted  |     |     |
+   Delay... | Preamble | SOF |        |      |        |      | MIC | EOF | Delay...
+            |          |     | Header | Body | Header | Body |     |     |
+            '----------+-----+--------+------+--------+------+-----+-----'
 ```
 
 * **Delay** is a minimum hold-off time as indicated in [Collision Avoidance](#collision-avoidance).
@@ -141,13 +181,14 @@ Each frame has the following layout:
   This is used to create attention, and can be used to determine baudrate.
 * **SOF** is the start-of-frame; a single one bit.
   This is used to indicate to the receiver whether it is in sync with the transmitter or not.
-* **Header** is an unencrypted piece, common to all messages.
-  This is used to allow unpaired devices to understand each other, and is used sparingly.
 * **Unencrypted** is an unencrypted piece of the message.
   This is used to allow unpaired devices to understand each other, and is used sparingly.
-* **EHeader** is an encrypted piece, common to all messages.
+  * **Header** is an unencrypted piece, common to all messages.
+  * **Body** is unencrypted data described for each message type.
 * **Encrypted** is the main message piece, using a pre-shared session key.
   This is used to allow only paired devices to understand each other.
+  * **Header** is an encrypted piece, common to all messages.
+  * **Body** is encrypted data described for each message type.
 * **MIC** is the message integrity code used to detect message corruption.
   It covers the entire message, from *Header* to *Encrypted*.
   It may be part of the Encrypted plain text, depending on the algorithm in use.
@@ -181,6 +222,7 @@ Framing and data errors can occur in multiple places:
 * The message type or other fields are unrecognized.
 
 A receiver must discard erroneous frames and wait for half the bursting interval (i.e. 64 preamble lengths) before accepting a new preamble.
+It should start this delay from when the radio is silent for the first time after the error is detected.
 
 A receiver should not indicate that it is receiving, unless the data is likely an attempted Openepo frame.
 I.e. framing errors do not cause the receiver to acknowledge the signal.
@@ -193,10 +235,45 @@ Message are tightly packed structs of fields.
 Where variable-length data is needed, it is transmitted after all fixed-length data within its frame part.
 This then naturally forms a header and a body.
 It may be applied recursively, forming a chain of headers and bodies.
+This organizes data in passes, and optimizes for requiring as few length-dependent passes as possible.
 
 All integers are sent most significant bit first.
 
-A type like `Interface[uint8]` means a variable-length list of `Interface` using a `uint8` to describe the number of elements.
+#### Discriminated Unions
+
+The protocol makes extensive use of discriminated unions.
+In most cases, the size is implicit, based on the discriminant.
+If the receiving device does not recognize the discriminant, the message must be considered erroneous.
+
+The unions may be extensible if given a type name (and not just its field name.)
+In this case, they must also describe the type used for sizes of that union:
+
+```
+union ProtectionAlgorithmHeader[uint8] {} protection_algorithm
+```
+
+explains that if the union is used in a variable-length context, a uint8 will be used to encode the size of individual elements.
+
+#### Variable-Length Lists
+
+Lists of variable length are encoded as the number of elements in the fixed part (for structs; the size in bytes.)
+
+A field like `Interface[uint8]` means a variable-length list of `Interface` using a `uint8` to describe the number of elements.
+If, as in the case of `Interface`, the type is an extensible discriminated union, it forms a chain as discussed above:
+
+```
+number of elements of the Interface[uint8]
+...
+size of Interface[0]
+fixed data of Interface[0]
+size of Interface[1]
+fixed data of Interface[1]
+....
+variable data of Interface[0].*
+variable data of Interface[1].*
+```
+
+If the variable data of `Interface[0].*` itself contains extensible discriminated unions, they will add yet another link in the chain.
 
 ### Message Header
 
@@ -210,9 +287,10 @@ struct UnencryptedHeader {
 }
 
 struct UnencryptedHeaderV1 {
-  uint4 type
+  uint4    type
+  uint8[4] session_id
 
-  union ProtectionAlgorithmHeader {} protection_algorithm
+  union ProtectionAlgorithmHeader[uint8] {} protection_algorithm
 }
 
 enum Version : uint4 {
@@ -221,6 +299,12 @@ enum Version : uint4 {
 ```
 
 ### Encrypted Header
+
+Each message for paired devices contains a sequence number.
+It is used to de-duplicate requests and avoid responding to replayed frames.
+This is required both because of bursting sending the same message more than once, and avoiding replay attacks.
+Each frame in a burst must have the same sequence number.
+As a general rule of thumb, the sequence number denotes the *generation* of the message, and is not a frame counter.
 
 ```
 struct Header {
@@ -248,14 +332,15 @@ The Hello message is sent by the receiver over a line-of-sight medium to request
 
 ```
 struct HelloUnencrypted {
-  ProtectionAlgorithm[uint8] protection_algorithm
-  Interface[uint8] interfaces
+  ProtectionAlgorithm[uint8] protection_algorithms
+  Interface[uint8] supported_interfaces
+  uint8[4] session_id
 }
 
 struct ProtectionAlgorithm {
   ProtectionAlgorithmType type
 
-  union Parameters {} parameters
+  union Parameters[uint8] {} parameters
 }
 
 // Follows https://www.iana.org/assignments/aead-parameters/aead-parameters.xhtml for values under 128.
@@ -264,51 +349,69 @@ enum ProtectionAlgorithmType : uint8 {}
 
 struct Interface {
   InterfaceType type
+
+  union Parameters[uint8] {} parameters
 }
 
 enum InterfaceType : uint8 {}
 ```
 
-### Establish (type 2)
+### Bound (type 2)
 
-The Establish message is sent by the transmitter over radio, requesting pairing.
-It is only valid in configuration mode.
+The Bound message is sent by the receiver over a line-of-sight medium, indicating successful pairing.
 
 * Message Type: 2
 * Unencrypted: empty
-* Encrypted: `Establish`
+* Encrypted: empty
 
-```
-struct Establish {
-  ProtectionAlgorithmType protection_algorithm_type
-  uint8[16] transmitter_id
-  InterfaceType[uint8] interface_types
-}
-```
+### Bind (type 3)
 
-### Terminate (type 3)
-
-The Terminate message is sent by the transmitter over radio, requesting unpairing.
+The Bind message is sent by the transmitter over radio, requesting pairing.
 It is only valid in configuration mode.
 
+The transmitter ID is expected to be a stable identifier, where one transmitter has one ID, regardless of the receiver.
+This allows a management user interface to understand that two receivers are using the same key, which may help the user's device inventory.
+It is regenerated during a factory reset, so that a key given away can avoid being tracked by the previous owner.
+
+The session ID is expected to be unique to the transmitter-receiver pairing.
+It allows (probabilitistically) uniquely identifying the right session key without while making the identifier as limited as possible to an eavesdropper.
+
 * Message Type: 3
-* Unencrypted: empty
-* Encrypted: `Terminate`
+* Unencrypted: `UnencryptedBind`
+* Encrypted: `Bind`
 
 ```
-struct Terminate {
-  uint8[16] transmitter_id
+struct UnencryptedBind {
+  ProtectionAlgorithmType protection_algorithm_type
+}
+
+struct Bind {
+  uint8[8]                transmitter_id
+  InterfaceType[uint8]    interface_types
 }
 ```
 
-### Configure (type 4)
+### Unbind (type 4)
+
+The Unbind message is sent by the transmitter over radio, requesting unpairing.
+It is only valid in configuration mode.
+
+* Message Type: 4
+* Unencrypted: empty
+* Encrypted: `Unbind`
+
+```
+struct Unbind {}
+```
+
+### Configure (type 5)
 
 The Configure message is sent by the transmitter over radio, asking that the receiver be placed into configuration mode.
 The receiver should revert to normal mode after some time, e.g. 30 seconds.
 
 A receiver may choose to go into configuration mode even for other messages, but this message is guaranteed to not cause other actions.
 
-* Message type: 4
+* Message type: 5
 * Unencrypted: empty
 * Encrypted: empty
 
@@ -324,7 +427,7 @@ The Act message is sent by the transmitter over radio, requesting that the recei
 struct Act {
   InterfaceType interface
 
-  union Parameters {} parameters
+  union Parameters[uint8] {} parameters
 }
 ```
 
@@ -340,6 +443,8 @@ Just kidding, there is no unencrypted mode.
 Encryption uses AES-128 with the OCB3 block mode, defined in [RFC 7253](https://www.rfc-editor.org/rfc/rfc7253.txt).
 It is an [AEAD](https://en.wikipedia.org/wiki/Authenticated_encryption#Authenticated_encryption_with_associated_data_(AEAD)), meaning the MIC is integrated into the block mode algorithm (where it is referred to as the "tag.")
 
+The `Aes128Ocb*Header.nonce` field is skipped (considered zero-length) when computing the AD hash.
+
 ```
 enum ProtectionAlgorithmType {
   AEAD_AES_128_OCB_TAGLEN128 = 20
@@ -352,7 +457,7 @@ union ProtectionAlgorithm::Parameters {
 }
 
 struct Aes128OcbParameters {
-  uint8[16] shared_key
+  uint8[16] session_key
 }
 
 union UnencryptedHeaderV1::ProtectionAlgorithmHeader {
@@ -381,8 +486,11 @@ struct Aes128Ocb64Header {
   One way would be to use a small (32/64-bit) block cipher, but AES-128 is too large.
   This specification does not dictate a nonce algorithm, because combining anonymity and guaranteed uniqueness is a difficult trade-off in systems with limited memory.
   There are some possibilities:
-  * [Skip32](https://wiki.postgresql.org/wiki/Skip32_(crypt_32_bits)) is in use for obfuscating sequence numbers.
-  * [RC5](https://en.wikipedia.org/wiki/RC5) has a 32/64-bit block sizes.
+  * [RC5](https://en.wikipedia.org/wiki/RC5), defined by RSA, has a 32/64-bit block sizes.
+    Based on [cryptopp](https://github.com/weidai11/cryptopp/blob/master/skipjack.cpp), the key setup is more complicated than Skip32, but rounds are simpler.
+    And [Sen, 2006](https://www.researchgate.net/publication/234689233_Security_in_Wireless_Sensor_Networks) suggests that RC5 is overall faster, though it's not a main result.
+  * [Skipjack](https://wiki.postgresql.org/wiki/Skip32_(crypt_32_bits)), defined by the NSA, is in use for obfuscating sequence numbers.
+    NIST [deprecated Skipjack in 2010](https://csrc.nist.gov/pubs/sp/800/131/a/final).
   * [Speck](https://en.wikipedia.org/wiki/Speck_(cipher)), defined by the NSA, has 32/64-bit block sizes.
   * [KATAN/KTANTAN](https://link.springer.com/chapter/10.1007/978-3-642-04138-9_20) does not seem to have received much analysis after 2013.
 * The same key should not be used to transmit more than 4 PiB of message data.
@@ -436,6 +544,42 @@ struct ButtonAct {}
   The limit can be made per message type.
   Note that powering the device off and on again could circumvent a simple rate limiter.
   It is suggested to introduce a slight startup delay to enforce the limit.
+* Denial-of-Service attacks using RF jammers or stickers over the line-of-sight transmitters are difficult to defend against.
+  Using short frames increases the probability of getting a good message through, but is insufficient if the DoS signal is broad-spectrum noise.
+  Receivers should avoid excessive hold-off and back-off, and provide the largest possible time window of reception.
+  Limits (reception rates, number of transmitters) should be set with decryption processing times in mind.
+
+
+## Design Considerations
+
+### Anonymity
+
+An unusual property in communication systems is anonymity: not letting an eavesdropper know that two messages belong to the same session.
+Usually, there is an identifier describing the destination, or source-destination (session) pair.
+A recent example is the [connection ID in QUIC](https://datatracker.ietf.org/doc/html/rfc8999#name-connection-id), helping in cases of roaming.
+
+There is a duality between anonymity and efficiency in the case of encrypted streams in public media:
+
+1. On the one hand, streams could be completely encrypted and integrity protected.
+   The receiver would have no choice but to run decryption for every known key on every packet until the plain text is proven corrupt.
+2. On the other hand, streams could contain a plain text identifier, to be used to pick the right key.
+   If the identifier is short, e.g. local to the paired receiver, it may cause multiple receivers believing they are the intended recipient.
+   If the identifier is long, e.g. a unique transmitter/session identifier, a receiver could be more certain it is the right recipient.
+
+The longer the (plain text) session identifier, the lower the degree of anonymity.
+
+Because we do not require two-way communications, we cannot use automatic re-keying or code hopping: the transmitter would have no way of knowing if the receiver knows about the new key/identifier.
+It would have to make a guess at the key, which is the problem we are trying to solve.
+
+A hybrid solution is to encrypt the session identifier with a lightweight cipher, and if that "works out," then attempt full decryption.
+The goal is to narrow down the session key search space.
+With large block sizes of the main cipher, and a wish for compact frames, this will require the devices to support two encryption algorithms.
+
+A less anonymous solution is to allow the OCB nonce to be a counter, and limit the key search space using a window from the previously received value.
+If transmitters start at zero, and all are deployed at the same time, this barely narrows the search space.
+If transmitters start at a random value, it is virtually identical to a session identifier.
+
+As of now, no good solution has been found to this problem under the given requirements.
 
 
 ## License
